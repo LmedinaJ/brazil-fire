@@ -179,8 +179,8 @@ class ModelTrainer:
         # Configuration to ensure operations execute on GPU
         config = tf.ConfigProto(
             gpu_options=gpu_options,
-            log_device_placement=False,  # Set to True for device placement debugging
-            allow_soft_placement=True    # Allows fallback to CPU if an op doesn't support GPU
+            log_device_placement=True,  # Shows which device each operation is assigned to
+            allow_soft_placement=True   # Allows fallback to CPU if an op doesn't support GPU
         )
 
         # Log de dispositivos disponibles
