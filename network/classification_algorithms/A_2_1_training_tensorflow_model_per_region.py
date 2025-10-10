@@ -58,6 +58,20 @@ import ipywidgets as widgets
 from IPython.display import display, HTML, clear_output
 
 # ====================================
+# 🔧 GPU ACCELERATION SETUP (CuPy)
+# ====================================
+
+# Tentar importar CuPy para aceleração GPU em operações NumPy
+try:
+    import cupy as cp
+    GPU_AVAILABLE = True
+    print("[INFO] CuPy detected. GPU acceleration enabled for data processing.")
+except ImportError:
+    cp = np  # Fallback para NumPy se CuPy não estiver disponível
+    GPU_AVAILABLE = False
+    print("[INFO] CuPy not available. Using NumPy for data processing (CPU).")
+
+# ====================================
 # 🌍 GLOBAL VARIABLES AND DIRECTORY SETUP
 # ====================================
 
@@ -154,7 +168,23 @@ class ModelTrainer:
             init = tf.global_variables_initializer()
             saver = tf.train.Saver()
 
-        gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.333)
+        # Configuración optimizada de GPU
+        gpu_options = tf.GPUOptions(
+            per_process_gpu_memory_fraction=0.8,  # Aumentado de 0.333 a 0.8 para mejor uso de GPU
+            allow_growth=True  # Permite crecimiento dinámico de memoria GPU
+        )
+
+        # Log de dispositivos disponibles
+        from tensorflow.python.client import device_lib
+        local_devices = device_lib.list_local_devices()
+        gpu_devices = [x.name for x in local_devices if x.device_type == 'GPU']
+
+        if gpu_devices:
+            log_message(f"[INFO] GPU devices available: {gpu_devices}")
+            log_message(f"[INFO] GPU memory fraction allocated: 80%")
+        else:
+            log_message("[WARNING] No GPU devices found. Training will run on CPU.")
+
         start_time = time.time()
 
         checkbox_label = self.get_active_checkbox().replace('⚠️', '').replace('✅', '').strip()
@@ -286,15 +316,28 @@ class FileManager:
 # ====================================
 
 
-# Função otimizada para remover NaNs e embaralhar os dados
+# Função otimizada para remover NaNs e embaralhar os dados (com suporte GPU)
 def filter_valid_data_and_shuffle(data):
-    """Remove rows with NaN and shuffles the data, optimized."""
-    # Remove NaNs de forma vetorizada, sem loops
-    mask = np.all(~np.isnan(data), axis=1)  # Cria uma máscara que identifica as linhas válidas
-    valid_data = data[mask]  # Aplica a máscara para filtrar as linhas válidas
+    """Remove rows with NaN and shuffles the data, optimized with GPU support."""
+    if GPU_AVAILABLE:
+        # Processamento acelerado por GPU usando CuPy
+        data_gpu = cp.asarray(data)  # Move dados para GPU
+        mask = cp.all(~cp.isnan(data_gpu), axis=1)  # Cria máscara na GPU
+        valid_data_gpu = data_gpu[mask]  # Filtra na GPU
 
-    # Embaralha os dados de forma eficiente
-    np.random.default_rng().shuffle(valid_data)  # Usando Generator mais rápido para embaralhamento
+        # Embaralha os dados na GPU
+        cp.random.shuffle(valid_data_gpu)
+
+        # Retorna para CPU como NumPy array
+        valid_data = cp.asnumpy(valid_data_gpu)
+    else:
+        # Fallback para CPU usando NumPy
+        mask = np.all(~np.isnan(data), axis=1)  # Cria uma máscara que identifica as linhas válidas
+        valid_data = data[mask]  # Aplica a máscara para filtrar as linhas válidas
+
+        # Embaralha os dados de forma eficiente
+        np.random.default_rng().shuffle(valid_data)  # Usando Generator mais rápido para embaralhamento
+
     return valid_data
 
 def fully_connected_layer(input, n_neurons, activation=None):
@@ -359,7 +402,13 @@ def sample_download_and_preparation(images_train_test):
     
     data_train_test_vector = np.concatenate(all_data_train_test_vector)
     log_message(f"[INFO] Concatenated data: {data_train_test_vector.shape}")
-    
+
+    # Filtrado y shuffle con soporte GPU
+    if GPU_AVAILABLE:
+        log_message("[INFO] Using GPU acceleration (CuPy) for data filtering and shuffling...")
+    else:
+        log_message("[INFO] Using CPU (NumPy) for data filtering and shuffling...")
+
     valid_data_train_test = filter_valid_data_and_shuffle(data_train_test_vector)
     log_message(f"[INFO] Valid data after filtering: {valid_data_train_test.shape}")
     
