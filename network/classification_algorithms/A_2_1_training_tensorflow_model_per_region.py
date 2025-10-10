@@ -145,33 +145,42 @@ class ModelTrainer:
         with graph.as_default():
             log_message(f"[INFO] Setting up the TensorFlow graph...")
 
-            x_input = tf.placeholder(tf.float32, shape=[None, NUM_INPUT], name='x_input')
-            y_input = tf.placeholder(tf.int64, shape=[None], name='y_input')
+            # Force all operations to execute on GPU
+            with tf.device('/GPU:0'):
+                x_input = tf.placeholder(tf.float32, shape=[None, NUM_INPUT], name='x_input')
+                y_input = tf.placeholder(tf.int64, shape=[None], name='y_input')
 
-            normalized = (x_input - data_mean) / data_std
+                normalized = (x_input - data_mean) / data_std
 
-            hidden1 = fully_connected_layer(normalized, n_neurons=NUM_N_L1, activation='relu')
-            hidden2 = fully_connected_layer(hidden1, n_neurons=NUM_N_L2, activation='relu')
-            hidden3 = fully_connected_layer(hidden2, n_neurons=NUM_N_L3, activation='relu')
-            hidden4 = fully_connected_layer(hidden3, n_neurons=NUM_N_L4, activation='relu')
-            hidden5 = fully_connected_layer(hidden4, n_neurons=NUM_N_L5, activation='relu')
-            logits = fully_connected_layer(hidden5, n_neurons=NUM_CLASSES)
+                hidden1 = fully_connected_layer(normalized, n_neurons=NUM_N_L1, activation='relu')
+                hidden2 = fully_connected_layer(hidden1, n_neurons=NUM_N_L2, activation='relu')
+                hidden3 = fully_connected_layer(hidden2, n_neurons=NUM_N_L3, activation='relu')
+                hidden4 = fully_connected_layer(hidden3, n_neurons=NUM_N_L4, activation='relu')
+                hidden5 = fully_connected_layer(hidden4, n_neurons=NUM_N_L5, activation='relu')
+                logits = fully_connected_layer(hidden5, n_neurons=NUM_CLASSES)
 
-            cross_entropy = tf.reduce_mean(
-                tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=y_input)
-            )
-            optimizer = tf.train.AdamOptimizer(lr).minimize(cross_entropy)
-            outputs = tf.argmax(logits, 1)
-            correct_prediction = tf.equal(outputs, y_input)
-            accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+                cross_entropy = tf.reduce_mean(
+                    tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=y_input)
+                )
+                optimizer = tf.train.AdamOptimizer(lr).minimize(cross_entropy)
+                outputs = tf.argmax(logits, 1)
+                correct_prediction = tf.equal(outputs, y_input)
+                accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
             init = tf.global_variables_initializer()
             saver = tf.train.Saver()
 
-        # Configuración optimizada de GPU
+        # Optimized GPU configuration
         gpu_options = tf.GPUOptions(
-            per_process_gpu_memory_fraction=0.8,  # Aumentado de 0.333 a 0.8 para mejor uso de GPU
-            allow_growth=True  # Permite crecimiento dinámico de memoria GPU
+            per_process_gpu_memory_fraction=0.8,  # Increased from 0.333 to 0.8 for better GPU usage
+            allow_growth=True  # Allows dynamic GPU memory growth
+        )
+
+        # Configuration to ensure operations execute on GPU
+        config = tf.ConfigProto(
+            gpu_options=gpu_options,
+            log_device_placement=False,  # Set to True for device placement debugging
+            allow_soft_placement=True    # Allows fallback to CPU if an op doesn't support GPU
         )
 
         # Log de dispositivos disponibles
@@ -200,7 +209,7 @@ class ModelTrainer:
         model_path = f'{self.folder_model}/col1_{self.country}_{version}_{region}_rnn_lstm_ckpt'
         json_path = f'{model_path}_hyperparameters.json'
 
-        with tf.Session(graph=graph, config=tf.ConfigProto(gpu_options=gpu_options)) as sess:
+        with tf.Session(graph=graph, config=config) as sess:
             sess.run(init)
             validation_dict = {x_input: validation_data[:, bi], y_input: validation_data[:, li]}
 

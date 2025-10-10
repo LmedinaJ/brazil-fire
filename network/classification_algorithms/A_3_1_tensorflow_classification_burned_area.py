@@ -26,6 +26,22 @@ import pyproj
 import shutil  # For file and folder operations
 import json
 import subprocess
+
+# ====================================
+# 🔧 GPU ACCELERATION SETUP (CuPy)
+# ====================================
+
+# Try to import CuPy for GPU-accelerated NumPy operations
+try:
+    import cupy as cp
+    from cupyx.scipy import ndimage as cp_ndimage
+    GPU_AVAILABLE = True
+    print("[INFO] CuPy detected. GPU acceleration enabled for data processing.")
+except ImportError:
+    cp = np  # Fallback to NumPy if CuPy is not available
+    cp_ndimage = ndimage
+    GPU_AVAILABLE = False
+    print("[INFO] CuPy not available. Using NumPy for data processing (CPU).")
 # ====================================
 # 🧰 SUPPORT FUNCTIONS (utils)
 # ====================================
@@ -57,7 +73,7 @@ def reshape_single_vector(data_classify):
 
 def filter_spatial(output_image_data):
     """
-    Apply spatial filtering on a classified image:
+    Apply spatial filtering on a classified image with GPU acceleration support:
       1) conditional opening filter based on opening_spatial_filter
       2) conditional closing filter based on choose_spatial_filter
 
@@ -93,41 +109,84 @@ def filter_spatial(output_image_data):
 
     log_message("[INFO] Applying spatial filtering on classified image")
 
-    # 2) Binariza e faz opening fixo 2×2
-    binary_image = output_image_data > 0
+    # Use GPU acceleration if available
+    if GPU_AVAILABLE:
+        log_message("[INFO] Using GPU acceleration (CuPy) for spatial filtering")
+        # Move data to GPU
+        output_gpu = cp.asarray(output_image_data)
 
-    # 3) Decide o opening
-    if ofs is False:
-        log_message("[INFO] Skipping opening filter step as requested.")
-        open_image = binary_image
+        # 2) Binariza
+        binary_image = output_gpu > 0
+
+        # 3) Decide o opening
+        if ofs is False:
+            log_message("[INFO] Skipping opening filter step as requested.")
+            open_image = binary_image
+        else:
+            # define M
+            try:
+                m = int(ofs) if ofs is not None else 2
+            except (ValueError, TypeError):
+                log_message(f"[WARNING] Invalid opening filter size '{ofs}'; defaulting to 2×2.")
+                m = 2
+
+            log_message(f"[INFO] Applying opening filter with {m}x{m} structuring element.")
+            open_image = cp_ndimage.binary_opening(binary_image, structure=cp.ones((m, m)))
+
+        # 4) Decide o closing
+        if cfs is False:
+            log_message("[INFO] Skipping closing filter step as requested.")
+            close_image = open_image
+        else:
+            # define N
+            try:
+                n = int(cfs) if cfs is not None else 4
+            except (ValueError, TypeError):
+                log_message(f"[WARNING] Invalid closing filter size '{cfs}'; defaulting to 4×4.")
+                n = 4
+
+            log_message(f"[INFO] Applying closing filter with {n}×{n} structuring element.")
+            close_image = cp_ndimage.binary_closing(open_image, structure=cp.ones((n, n)))
+
+        # Move back to CPU and return
+        return cp.asnumpy(close_image).astype('uint8')
     else:
-      # define M
-        try:
-          m = int(ofs) if ofs is not None else 2
-        except (ValueError, TypeError):
-          log_message(f"[WARNING] Invalid opening filter size '{ofs}'; defaulting to 2×2.")
-          m = 2
+        log_message("[INFO] Using CPU (NumPy) for spatial filtering")
+        # 2) Binariza e faz opening fixo 2×2
+        binary_image = output_image_data > 0
 
-        log_message(f"[INFO] Applying opening filter with {m}x{m} structuring element.")
-        open_image   = ndimage.binary_opening(binary_image, structure=np.ones((m, m)))
+        # 3) Decide o opening
+        if ofs is False:
+            log_message("[INFO] Skipping opening filter step as requested.")
+            open_image = binary_image
+        else:
+          # define M
+            try:
+              m = int(ofs) if ofs is not None else 2
+            except (ValueError, TypeError):
+              log_message(f"[WARNING] Invalid opening filter size '{ofs}'; defaulting to 2×2.")
+              m = 2
 
-    # 4) Decide o closing
-    if cfs is False:
-        log_message("[INFO] Skipping closing filter step as requested.")
-        close_image = open_image
-    else:
-        # define N
-        try:
-            n = int(cfs) if cfs is not None else 4
-        except (ValueError, TypeError):
-            log_message(f"[WARNING] Invalid closing filter size '{cfs}'; defaulting to 4×4.")
-            n = 4
+            log_message(f"[INFO] Applying opening filter with {m}x{m} structuring element.")
+            open_image   = ndimage.binary_opening(binary_image, structure=np.ones((m, m)))
 
-        log_message(f"[INFO] Applying closing filter with {n}×{n} structuring element.")
-        close_image = ndimage.binary_closing(open_image, structure=np.ones((n, n)))
+        # 4) Decide o closing
+        if cfs is False:
+            log_message("[INFO] Skipping closing filter step as requested.")
+            close_image = open_image
+        else:
+            # define N
+            try:
+                n = int(cfs) if cfs is not None else 4
+            except (ValueError, TypeError):
+                log_message(f"[WARNING] Invalid closing filter size '{cfs}'; defaulting to 4×4.")
+                n = 4
 
-    # 4) Converte e retorna
-    return close_image.astype('uint8')
+            log_message(f"[INFO] Applying closing filter with {n}×{n} structuring element.")
+            close_image = ndimage.binary_closing(open_image, structure=np.ones((n, n)))
+
+        # 4) Converte e retorna
+        return close_image.astype('uint8')
 
 # Function to convert a NumPy array back into a GeoTIFF raster
 def convert_to_raster(dataset_classify, image_data_scene, output_image_name):
@@ -396,37 +455,39 @@ def create_model_graph(hyperparameters):
     graph = tf.Graph()
 
     with graph.as_default():
-        # Define placeholders para dados de entrada e rótulos
-        x_input = tf.placeholder(tf.float32, shape=[None, hyperparameters['NUM_INPUT']], name='x_input')
-        y_input = tf.placeholder(tf.int64, shape=[None], name='y_input')
+        # Force all operations to execute on GPU
+        with tf.device('/GPU:0'):
+            # Define placeholders para dados de entrada e rótulos
+            x_input = tf.placeholder(tf.float32, shape=[None, hyperparameters['NUM_INPUT']], name='x_input')
+            y_input = tf.placeholder(tf.int64, shape=[None], name='y_input')
 
-        # Normaliza os dados de entrada
-        normalized = (x_input - hyperparameters['data_mean']) / hyperparameters['data_std']
+            # Normaliza os dados de entrada
+            normalized = (x_input - hyperparameters['data_mean']) / hyperparameters['data_std']
 
-        # Constrói as camadas da rede neural com os hiperparâmetros definidos
-        hidden1 = fully_connected_layer(normalized, n_neurons=hyperparameters['NUM_N_L1'], activation='relu')
-        hidden2 = fully_connected_layer(hidden1, n_neurons=hyperparameters['NUM_N_L2'], activation='relu')
-        hidden3 = fully_connected_layer(hidden2, n_neurons=hyperparameters['NUM_N_L3'], activation='relu')
-        hidden4 = fully_connected_layer(hidden3, n_neurons=hyperparameters['NUM_N_L4'], activation='relu')
-        hidden5 = fully_connected_layer(hidden4, n_neurons=hyperparameters['NUM_N_L5'], activation='relu')
+            # Constrói as camadas da rede neural com os hiperparâmetros definidos
+            hidden1 = fully_connected_layer(normalized, n_neurons=hyperparameters['NUM_N_L1'], activation='relu')
+            hidden2 = fully_connected_layer(hidden1, n_neurons=hyperparameters['NUM_N_L2'], activation='relu')
+            hidden3 = fully_connected_layer(hidden2, n_neurons=hyperparameters['NUM_N_L3'], activation='relu')
+            hidden4 = fully_connected_layer(hidden3, n_neurons=hyperparameters['NUM_N_L4'], activation='relu')
+            hidden5 = fully_connected_layer(hidden4, n_neurons=hyperparameters['NUM_N_L5'], activation='relu')
 
-        # Camada final de saída
-        logits = fully_connected_layer(hidden5, n_neurons=hyperparameters['NUM_CLASSES'])
-        
-        # Define a função de perda (para treinamento, embora não seja necessária na inferência)
-        cross_entropy = tf.reduce_mean(
-            tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=y_input),
-            name='cross_entropy_loss'
-        )
-        
-        # Define o otimizador (para treinamento, embora não seja necessária na inferência)
-        # optimizer = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE).minimize(cross_entropy)
-        # Define the optimizer: Adam with the specified learning rate
-        optimizer = tf.train.AdamOptimizer(hyperparameters['lr']).minimize(cross_entropy)
-        
-        # Operação para obter a classe prevista
-        outputs = tf.argmax(logits, 1, name='predicted_class')
-        
+            # Camada final de saída
+            logits = fully_connected_layer(hidden5, n_neurons=hyperparameters['NUM_CLASSES'])
+
+            # Define a função de perda (para treinamento, embora não seja necessária na inferência)
+            cross_entropy = tf.reduce_mean(
+                tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=y_input),
+                name='cross_entropy_loss'
+            )
+
+            # Define o otimizador (para treinamento, embora não seja necessária na inferência)
+            # optimizer = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE).minimize(cross_entropy)
+            # Define the optimizer: Adam with the specified learning rate
+            optimizer = tf.train.AdamOptimizer(hyperparameters['lr']).minimize(cross_entropy)
+
+            # Operação para obter a classe prevista
+            outputs = tf.argmax(logits, 1, name='predicted_class')
+
         # Inicializa todas as variáveis
         init = tf.global_variables_initializer()
         # Definir o saver para salvar ou restaurar o estado do modelo
@@ -470,10 +531,22 @@ def classify(data_classify_vector, model_path, hyperparameters, block_size=40000
 
         # Create model graph using provided hyperparameters for each block
         graph, placeholders, saver = create_model_graph(hyperparameters)
-        gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.50)
+
+        # Optimized GPU configuration
+        gpu_options = tf.GPUOptions(
+            per_process_gpu_memory_fraction=0.8,  # Increased from 0.50 to 0.8 for better GPU usage
+            allow_growth=True  # Allows dynamic GPU memory growth
+        )
+
+        # Configuration to ensure operations execute on GPU
+        config = tf.ConfigProto(
+            gpu_options=gpu_options,
+            log_device_placement=False,  # Set to True for device placement debugging
+            allow_soft_placement=True    # Allows fallback to CPU if an op doesn't support GPU
+        )
 
         # Start a new session and restore the model
-        with tf.Session(graph=graph, config=tf.ConfigProto(gpu_options=gpu_options)) as sess:
+        with tf.Session(graph=graph, config=config) as sess:
             saver.restore(sess, model_path)
             
             # Classify the current block of data
