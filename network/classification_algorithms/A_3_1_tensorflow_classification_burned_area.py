@@ -42,6 +42,41 @@ except ImportError:
     cp_ndimage = ndimage
     GPU_AVAILABLE = False
     print("[INFO] CuPy not available. Using NumPy for data processing (CPU).")
+
+# ====================================
+# 📝 GPU DEBUG LOGGING SETUP
+# ====================================
+
+import logging
+import sys
+
+# Create logger for GPU debugging
+gpu_logger = logging.getLogger('gpu_debug')
+gpu_logger.setLevel(logging.DEBUG)
+
+# Create file handler
+log_file = '/content/gpu_classification_debug.log'
+file_handler = logging.FileHandler(log_file, mode='w')
+file_handler.setLevel(logging.DEBUG)
+
+# Create console handler
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+
+# Create formatter
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Add handlers
+gpu_logger.addHandler(file_handler)
+gpu_logger.addHandler(console_handler)
+
+gpu_logger.info("="*80)
+gpu_logger.info("GPU DEBUG LOGGING INITIALIZED")
+gpu_logger.info(f"Log file: {log_file}")
+gpu_logger.info("="*80)
+
 # ====================================
 # 🧰 SUPPORT FUNCTIONS (utils)
 # ====================================
@@ -452,9 +487,17 @@ def create_model_graph(hyperparameters):
     """
     Cria e retorna um grafo computacional TensorFlow dinamicamente com base nos parâmetros do modelo.
     """
+    gpu_logger.info("Creating TensorFlow model graph")
+    gpu_logger.info(f"Hyperparameters: {hyperparameters}")
+
+    # Check GPU availability
+    gpus = tf.config.list_physical_devices('GPU')
+    gpu_logger.info(f"Available GPUs: {gpus}")
+
     graph = tf.Graph()
 
     with graph.as_default():
+        gpu_logger.info("Forcing operations to GPU:0 with tf.device('/GPU:0')")
         # Force all operations to execute on GPU
         with tf.device('/GPU:0'):
             # Define placeholders para dados de entrada e rótulos
@@ -545,16 +588,27 @@ def classify(data_classify_vector, model_path, hyperparameters, block_size=40000
             allow_soft_placement=True   # Allows fallback to CPU if an op doesn't support GPU
         )
 
+        gpu_logger.info(f"Processing block {i+1}/{num_blocks}")
+        gpu_logger.info(f"GPU memory fraction: 0.8")
+        gpu_logger.info(f"Allow growth: True")
+        gpu_logger.info(f"Log device placement: True")
+        gpu_logger.info(f"Block size: {end_idx - start_idx} pixels")
+
         # Start a new session and restore the model
         with tf.Session(graph=graph, config=config) as sess:
+            gpu_logger.info("TensorFlow session created")
+            gpu_logger.info(f"Restoring model from: {model_path}")
             saver.restore(sess, model_path)
-            
+            gpu_logger.info("Model restored successfully")
+
             # Classify the current block of data
+            gpu_logger.info(f"Running inference on {len(data_block)} pixels")
             output_block = sess.run(
                 graph.get_tensor_by_name('predicted_class:0'),
                 feed_dict={placeholders['x_input']: data_block}
             )
-            
+            gpu_logger.info(f"Inference completed for block {i+1}/{num_blocks}")
+
             # Append the classified block to the result list
             output_blocks.append(output_block)
 
