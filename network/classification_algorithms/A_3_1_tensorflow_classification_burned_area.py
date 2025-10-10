@@ -623,7 +623,7 @@ def classify(data_classify_vector, model_path, hyperparameters, block_size=40000
 def process_single_image(dataset_classify, version, region,folder_temp):
     """
     Processes a single image by applying the classification model and spatial filtering to generate the final result.
-    
+
     Args:
     - dataset_classify: GDAL dataset of the image to be classified.
     - num_classes: Number of classes in the model.
@@ -631,33 +631,45 @@ def process_single_image(dataset_classify, version, region,folder_temp):
     - data_std: Standard deviation of the data for normalization.
     - version: Version of the model.
     - region: Target region for classification.
-    
+
     Returns:
     - Filtered classified image.
     """
+    gpu_logger.info("="*80)
+    gpu_logger.info("PROCESS_SINGLE_IMAGE STARTED")
+    gpu_logger.info(f"Version: {version}, Region: {region}")
+    gpu_logger.info("="*80)
+
     # Path to the remote model in Google Cloud Storage (with wildcards)
     gcs_model_file = f'gs://{bucket_name}/sudamerica/{country}/models_col1/col1_{country}_{version}_{region}_rnn_lstm_ckpt*'
     # Local path for the model files
     model_file_local_temp = f'{folder_temp}/col1_{country}_{version}_{region}_rnn_lstm_ckpt'
 
     log_message(f"[INFO] Downloading TensorFlow model from GCS {gcs_model_file} to {folder_temp}.")
+    gpu_logger.info(f"Downloading model from GCS: {gcs_model_file}")
     
     # Command to download the model files from GCS
     try:
+        gpu_logger.info("Executing gsutil cp command...")
         subprocess.run(f'gsutil cp {gcs_model_file} {folder_temp}', shell=True, check=True)
         time.sleep(2)
         fs.invalidate_cache()
         log_message(f"[INFO] Model downloaded successfully.")
+        gpu_logger.info("Model files downloaded successfully")
     except subprocess.CalledProcessError as e:
         log_message(f"[ERROR] Failed to download model from GCS: {e}")
+        gpu_logger.error(f"Failed to download model: {e}")
         return None
 
     # Path to the JSON file containing hyperparameters
     json_path = f'{folder_temp}/col1_{country}_{version}_{region}_rnn_lstm_ckpt_hyperparameters.json'
+    gpu_logger.info(f"Loading hyperparameters from: {json_path}")
 
     # Load hyperparameters from the JSON file
     with open(json_path, 'r') as json_file:
         hyperparameters = json.load(json_file)
+
+    gpu_logger.info(f"Hyperparameters loaded: {hyperparameters}")
 
     # Retrieve hyperparameter values from the JSON file
     DATA_MEAN = np.array(hyperparameters['data_mean'])
@@ -674,11 +686,15 @@ def process_single_image(dataset_classify, version, region,folder_temp):
 
     # Convert GDAL dataset to a NumPy array
     log_message(f"[INFO] Converting GDAL dataset to NumPy array.")
+    gpu_logger.info("Converting GDAL dataset to NumPy array")
     data_classify = convert_to_array(dataset_classify)
-    
+    gpu_logger.info(f"Array shape: {data_classify.shape}")
+
     # Reshape into a single pixel vector
     log_message(f"[INFO] Reshaping data into a single pixel vector.")
+    gpu_logger.info("Reshaping data into single pixel vector")
     data_classify_vector = reshape_single_vector(data_classify)
+    gpu_logger.info(f"Vector shape: {data_classify_vector.shape}")
     # print('data_classify_vector',data_classify_vector)
     # Normalize the input vector using data_mean and data_std
     # log_message(f"[INFO] Normalizing the input vector using data_mean and data_std.")
@@ -686,15 +702,26 @@ def process_single_image(dataset_classify, version, region,folder_temp):
 
     # Perform the classification using the model
     log_message(f"[INFO] Running classification using the model.")
+    gpu_logger.info("="*80)
+    gpu_logger.info("CALLING CLASSIFY() FUNCTION")
+    gpu_logger.info(f"Model path: {model_file_local_temp}")
+    gpu_logger.info(f"Input data shape: {data_classify_vector.shape}")
+    gpu_logger.info("="*80)
+
     output_data_classified = classify(data_classify_vector, model_file_local_temp, hyperparameters)
-    
+
+    gpu_logger.info("Classification completed successfully")
+
     # Reshape the classified data back into image format
     log_message(f"[INFO] Reshaping classified data back into image format.")
     output_image_data = reshape_image_output(output_data_classified, data_classify)
-    
+
     # Apply spatial filtering
     log_message(f"[INFO] Applying spatial filtering and completing the processing of this scene.")
-    return filter_spatial(output_image_data)
+    gpu_logger.info("Applying spatial filtering")
+    result = filter_spatial(output_image_data)
+    gpu_logger.info("PROCESS_SINGLE_IMAGE COMPLETED")
+    return result
 
 def process_year_by_satellite(satellite_years, bucket_name, folder_mosaic, folder_temp, suffix,
                               ee_project, country, version, region, simulate_test=False):
