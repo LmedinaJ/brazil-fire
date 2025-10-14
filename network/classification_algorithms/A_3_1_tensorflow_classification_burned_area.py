@@ -538,6 +538,35 @@ def create_model_graph(hyperparameters):
 
     return graph, {'x_input': x_input, 'y_input': y_input}, saver
 
+# Function to get GPU status
+def get_gpu_status():
+    """Get current GPU status using nvidia-smi."""
+    try:
+        result = subprocess.run(
+            [
+                'nvidia-smi',
+                '--query-gpu=utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu',
+                '--format=csv,noheader,nounits'
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+
+        if result.returncode == 0:
+            parts = [p.strip() for p in result.stdout.strip().split(',')]
+            if len(parts) >= 5:
+                return {
+                    'gpu_util': int(parts[0]),
+                    'mem_util': int(parts[1]),
+                    'mem_used': int(parts[2]),
+                    'mem_total': int(parts[3]),
+                    'temperature': int(parts[4])
+                }
+    except:
+        pass
+    return None
+
 # Function to classify data using a TensorFlow model in blocks and handle memory manually
 def classify(data_classify_vector, model_path, hyperparameters, block_size=40000000):
     """
@@ -548,12 +577,17 @@ def classify(data_classify_vector, model_path, hyperparameters, block_size=40000
     - model_path: Path to the TensorFlow model to be restored.
     - hyperparameters: Hyperparameters to create the model graph.
     - block_size: Number of pixels to process per block (default is 4,000,000).
-    
+
     Returns:
     - output_data_classify: Classified data.
     """
     log_message(f"[INFO] Starting classification with model at path: {model_path}")
-    
+
+    # Check initial GPU status
+    initial_gpu = get_gpu_status()
+    if initial_gpu:
+        log_message(f"[GPU] Initial Status: GPU {initial_gpu['gpu_util']}% | Memory {initial_gpu['mem_used']}MB/{initial_gpu['mem_total']}MB ({initial_gpu['mem_util']}%) | Temp {initial_gpu['temperature']}°C")
+
     # Number of pixels in the input data
     num_pixels = data_classify_vector.shape[0]
     num_blocks = (num_pixels + block_size - 1) // block_size  # Calculate the number of blocks
@@ -564,11 +598,17 @@ def classify(data_classify_vector, model_path, hyperparameters, block_size=40000
     for i in range(num_blocks):
         start_idx = i * block_size
         end_idx = min((i + 1) * block_size, num_pixels)  # Ensure we don't exceed array length
-        log_message(f"[INFO] Processing block {i+1}/{num_blocks} (pixels {start_idx} to {end_idx})")
+
+        # Get GPU status for this block
+        gpu_status = get_gpu_status()
+        if gpu_status:
+            log_message(f"[INFO] Block {i+1}/{num_blocks} (pixels {start_idx}-{end_idx}) | GPU: {gpu_status['gpu_util']}% | Memory: {gpu_status['mem_used']}MB/{gpu_status['mem_total']}MB ({gpu_status['mem_util']}%) | Temp: {gpu_status['temperature']}°C")
+        else:
+            log_message(f"[INFO] Processing block {i+1}/{num_blocks} (pixels {start_idx} to {end_idx})")
 
         # Get the current block of data to classify
         data_block = data_classify_vector[start_idx:end_idx]
-        
+
         # Clear the graph before starting a new session for each block
         tf.compat.v1.reset_default_graph()
 
@@ -599,7 +639,6 @@ def classify(data_classify_vector, model_path, hyperparameters, block_size=40000
             gpu_logger.info("TensorFlow session created")
             gpu_logger.info(f"Restoring model from: {model_path}")
             saver.restore(sess, model_path)
-            gpu_logger.info("Model restored successfully")
 
             # Classify the current block of data
             gpu_logger.info(f"Running inference on {len(data_block)} pixels")
@@ -607,7 +646,6 @@ def classify(data_classify_vector, model_path, hyperparameters, block_size=40000
                 graph.get_tensor_by_name('predicted_class:0'),
                 feed_dict={placeholders['x_input']: data_block}
             )
-            gpu_logger.info(f"Inference completed for block {i+1}/{num_blocks}")
 
             # Append the classified block to the result list
             output_blocks.append(output_block)
@@ -616,8 +654,14 @@ def classify(data_classify_vector, model_path, hyperparameters, block_size=40000
 
     # Concatenate the classified blocks into a single array
     output_data_classify = np.concatenate(output_blocks, axis=0)
+
+    # Final GPU status
+    final_gpu = get_gpu_status()
+    if final_gpu:
+        log_message(f"[GPU] Final Status: GPU {final_gpu['gpu_util']}% | Memory {final_gpu['mem_used']}MB/{final_gpu['mem_total']}MB ({final_gpu['mem_util']}%) | Temp {final_gpu['temperature']}°C")
+
     log_message(f"[INFO] Classification completed")
-    
+
     return output_data_classify
 
 def process_single_image(dataset_classify, version, region,folder_temp):
