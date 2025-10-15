@@ -89,22 +89,73 @@ def load_image(image_path):
         raise FileNotFoundError(f"Error loading image: {image_path}. Check the path.")
     return dataset
 
-# Function to convert a GDAL dataset to a NumPy array
+# Function to convert a GDAL dataset to a NumPy array (GPU-accelerated)
 def convert_to_array(dataset):
     log_message(f"[INFO] Converting dataset to NumPy array")
+    gpu_logger.info("Reading bands from GDAL dataset")
+
+    # Check GPU status before operation
+    gpu_status = get_gpu_status()
+    if gpu_status:
+        log_message(f"[GPU] Before array conversion: GPU {gpu_status['gpu_util']}% | Memory {gpu_status['mem_used']}MB/{gpu_status['mem_total']}MB ({gpu_status['mem_util']}%) | Temp {gpu_status['temperature']}°C")
+
+    # Read all bands into CPU memory first
     bands_data = [dataset.GetRasterBand(i + 1).ReadAsArray() for i in range(dataset.RasterCount)]
-    stacked_data = np.stack(bands_data, axis=2)
-    return stacked_data
-    # return np.nan_to_num(stacked_data, nan=0)
+
+    if GPU_AVAILABLE:
+        gpu_logger.info(f"Using GPU (CuPy) for array stacking - {len(bands_data)} bands")
+        # Move bands to GPU and stack there
+        bands_gpu = [cp.asarray(band) for band in bands_data]
+        stacked_data_gpu = cp.stack(bands_gpu, axis=2)
+
+        # Free GPU memory from individual bands
+        del bands_gpu
+        cp.get_default_memory_pool().free_all_blocks()
+
+        gpu_logger.info(f"Array stacked on GPU: shape={stacked_data_gpu.shape}, dtype={stacked_data_gpu.dtype}")
+
+        # Check GPU status after operation
+        gpu_status_after = get_gpu_status()
+        if gpu_status_after:
+            log_message(f"[GPU] After array conversion: GPU {gpu_status_after['gpu_util']}% | Memory {gpu_status_after['mem_used']}MB/{gpu_status_after['mem_total']}MB ({gpu_status_after['mem_util']}%) | Temp {gpu_status_after['temperature']}°C")
+
+        return stacked_data_gpu  # Return GPU array
+    else:
+        gpu_logger.info("Using CPU (NumPy) for array stacking")
+        stacked_data = np.stack(bands_data, axis=2)
+        return stacked_data
 
 # Function to reshape classified data back into image format
 def reshape_image_output(output_data_classified, data_classify):
     log_message(f"[INFO] Reshaping classified data back to image format")
     return output_data_classified.reshape([data_classify.shape[0], data_classify.shape[1]])
 
-# Function to reshape classified data into a single pixel vector
+# Function to reshape classified data into a single pixel vector (GPU-aware)
 def reshape_single_vector(data_classify):
-    return data_classify.reshape([data_classify.shape[0] * data_classify.shape[1], data_classify.shape[2]])
+    """
+    Reshape data into single pixel vector. Works with both NumPy and CuPy arrays.
+    If input is on GPU, output stays on GPU.
+    """
+    new_shape = [data_classify.shape[0] * data_classify.shape[1], data_classify.shape[2]]
+
+    # Check GPU status before reshape
+    gpu_status = get_gpu_status()
+    if gpu_status:
+        log_message(f"[GPU] Before reshape: GPU {gpu_status['gpu_util']}% | Memory {gpu_status['mem_used']}MB/{gpu_status['mem_total']}MB ({gpu_status['mem_util']}%) | Temp {gpu_status['temperature']}°C")
+
+    if GPU_AVAILABLE and isinstance(data_classify, cp.ndarray):
+        gpu_logger.info(f"Reshaping on GPU: {data_classify.shape} -> {new_shape}")
+        result = data_classify.reshape(new_shape)
+
+        # Check GPU status after reshape
+        gpu_status_after = get_gpu_status()
+        if gpu_status_after:
+            log_message(f"[GPU] After reshape: GPU {gpu_status_after['gpu_util']}% | Memory {gpu_status_after['mem_used']}MB/{gpu_status_after['mem_total']}MB ({gpu_status_after['mem_util']}%) | Temp {gpu_status_after['temperature']}°C")
+
+        return result
+    else:
+        gpu_logger.info(f"Reshaping on CPU: {data_classify.shape} -> {new_shape}")
+        return data_classify.reshape(new_shape)
 
 def filter_spatial(output_image_data):
     """
@@ -144,6 +195,11 @@ def filter_spatial(output_image_data):
 
     log_message("[INFO] Applying spatial filtering on classified image")
 
+    # Check GPU status before filtering
+    gpu_status = get_gpu_status()
+    if gpu_status:
+        log_message(f"[GPU] Before spatial filtering: GPU {gpu_status['gpu_util']}% | Memory {gpu_status['mem_used']}MB/{gpu_status['mem_total']}MB ({gpu_status['mem_util']}%) | Temp {gpu_status['temperature']}°C")
+
     # Use GPU acceleration if available
     if GPU_AVAILABLE:
         log_message("[INFO] Using GPU acceleration (CuPy) for spatial filtering")
@@ -182,6 +238,11 @@ def filter_spatial(output_image_data):
 
             log_message(f"[INFO] Applying closing filter with {n}×{n} structuring element.")
             close_image = cp_ndimage.binary_closing(open_image, structure=cp.ones((n, n)))
+
+        # Check GPU status after filtering
+        gpu_status_after = get_gpu_status()
+        if gpu_status_after:
+            log_message(f"[GPU] After spatial filtering: GPU {gpu_status_after['gpu_util']}% | Memory {gpu_status_after['mem_used']}MB/{gpu_status_after['mem_total']}MB ({gpu_status_after['mem_util']}%) | Temp {gpu_status_after['temperature']}°C")
 
         # Move back to CPU and return
         return cp.asnumpy(close_image).astype('uint8')
@@ -257,10 +318,19 @@ def has_significant_intersection(geom, image_bounds, min_intersection_area=0.01)
     return intersection.area >= min_intersection_area
 
 def clip_image_by_grid(geom, image, output, buffer_distance_meters=100, max_attempts=5, retry_delay=5):
+    import gc
     attempt = 0
+
+    # Check GPU status before clipping
+    gpu_status = get_gpu_status()
+    if gpu_status:
+        log_message(f"[GPU] Before clipping: GPU {gpu_status['gpu_util']}% | Memory {gpu_status['mem_used']}MB/{gpu_status['mem_total']}MB ({gpu_status['mem_util']}%) | Temp {gpu_status['temperature']}°C")
+
     while attempt < max_attempts:
         try:
             log_message(f"[INFO] Attempt {attempt+1}/{max_attempts} to clip image: {image}")
+            gpu_logger.info(f"Clipping image: {image}")
+
             with rasterio.open(image) as src:
                 # Obter o CRS da imagem
                 image_crs = src.crs
@@ -278,7 +348,7 @@ def clip_image_by_grid(geom, image, output, buffer_distance_meters=100, max_atte
                 # Verificar a interseção significativa
                 if has_significant_intersection(expanded_geom_geojson, src.bounds):
                     out_image, out_transform = mask(src, [expanded_geom_geojson], crop=True, nodata=np.nan, filled=True)
-                    
+
                     # Atualizar metadados
                     out_meta = src.meta.copy()
                     out_meta.update({
@@ -288,16 +358,30 @@ def clip_image_by_grid(geom, image, output, buffer_distance_meters=100, max_atte
                         "transform": out_transform,
                         "crs": src.crs
                     })
-                    
+
                     with rasterio.open(output, 'w', **out_meta) as dest:
                         dest.write(out_image)
+
+                    # Free memory immediately
+                    del out_image, out_transform, out_meta
+                    gc.collect()
+
                     log_message(f"[INFO] Image clipped successfully: {output}")
+                    gpu_logger.info(f"Clipping successful, memory freed")
+
+                    # Check GPU status after successful clipping
+                    gpu_status_after = get_gpu_status()
+                    if gpu_status_after:
+                        log_message(f"[GPU] After clipping: GPU {gpu_status_after['gpu_util']}% | Memory {gpu_status_after['mem_used']}MB/{gpu_status_after['mem_total']}MB ({gpu_status_after['mem_util']}%) | Temp {gpu_status_after['temperature']}°C")
+
                     return True  # Clipping successful
                 else:
                     log_message(f"[INFO] Insufficient overlap for clipping: {image}")
                     return False  # No significant intersection, no need to retry
         except Exception as e:
             log_message(f"[ERROR] Error during clipping: {str(e)}. Retrying in {retry_delay} seconds...")
+            gpu_logger.error(f"Clipping error: {str(e)}")
+            gc.collect()  # Force garbage collection on error
             time.sleep(retry_delay)
             attempt += 1
 
@@ -744,12 +828,40 @@ def process_single_image(dataset_classify, version, region,folder_temp):
     # log_message(f"[INFO] Normalizing the input vector using data_mean and data_std.")
     # data_classify_vector = (data_classify_vector - DATA_MEAN) / DATA_STD
 
+    # Transfer from GPU to CPU if necessary (TensorFlow needs NumPy arrays)
+    if GPU_AVAILABLE and isinstance(data_classify_vector, cp.ndarray):
+        # Check GPU status before transfer
+        gpu_status_before = get_gpu_status()
+        if gpu_status_before:
+            log_message(f"[GPU] Before GPU->CPU transfer: GPU {gpu_status_before['gpu_util']}% | Memory {gpu_status_before['mem_used']}MB/{gpu_status_before['mem_total']}MB ({gpu_status_before['mem_util']}%) | Temp {gpu_status_before['temperature']}°C")
+
+        gpu_logger.info("Transferring data from GPU to CPU for TensorFlow classification")
+        gpu_logger.info(f"GPU array size: {data_classify_vector.nbytes / (1024**2):.2f} MB")
+        log_message(f"[INFO] Transferring {data_classify_vector.nbytes / (1024**2):.2f} MB from GPU to CPU")
+
+        data_classify_vector_cpu = cp.asnumpy(data_classify_vector)
+
+        # Free GPU memory after transfer
+        del data_classify_vector
+        cp.get_default_memory_pool().free_all_blocks()
+        gpu_logger.info("GPU memory freed after transfer to CPU")
+
+        # Check GPU status after transfer
+        gpu_status_after = get_gpu_status()
+        if gpu_status_after:
+            log_message(f"[GPU] After GPU->CPU transfer: GPU {gpu_status_after['gpu_util']}% | Memory {gpu_status_after['mem_used']}MB/{gpu_status_after['mem_total']}MB ({gpu_status_after['mem_util']}%) | Temp {gpu_status_after['temperature']}°C")
+
+        data_classify_vector = data_classify_vector_cpu
+    else:
+        gpu_logger.info("Data already on CPU (NumPy array)")
+
     # Perform the classification using the model
     log_message(f"[INFO] Running classification using the model.")
     gpu_logger.info("="*80)
     gpu_logger.info("CALLING CLASSIFY() FUNCTION")
     gpu_logger.info(f"Model path: {model_file_local_temp}")
     gpu_logger.info(f"Input data shape: {data_classify_vector.shape}")
+    gpu_logger.info(f"Input data type: {type(data_classify_vector)}")
     gpu_logger.info("="*80)
 
     output_data_classified = classify(data_classify_vector, model_file_local_temp, hyperparameters)
